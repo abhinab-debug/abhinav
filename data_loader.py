@@ -5,6 +5,7 @@ import os
 import glob
 from typing import List, Optional
 from database_engine import NEPSEDatabaseEngine
+from feature_engineer import QuantitativeFeatureBridge
 
 class BulkDataLoader:
     """
@@ -105,6 +106,19 @@ class BulkDataLoader:
 
         # Post-Ingestion Closure Routine
         self.establish_high_performance_indexes()
+
+        # Trigger Feature Store Engineering
+        self.trigger_feature_engineering()
+
+    def trigger_feature_engineering(self):
+        """Calculates and persists quantitative vectors for all active symbols."""
+        conn = sqlite3.connect(self.db_path)
+        symbols = pd.read_sql_query("SELECT DISTINCT Symbol FROM floorsheet", conn)['Symbol'].tolist()
+        conn.close()
+
+        bridge = QuantitativeFeatureBridge(self.db_engine)
+        for sym in symbols:
+            bridge.generate_daily_features(sym)
 
     def establish_high_performance_indexes(self):
         """
