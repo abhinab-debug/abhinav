@@ -2,78 +2,60 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import os
-import re
-from typing import List, Dict, Optional
+import glob
+from typing import List, Optional
 from database_engine import NEPSEDatabaseEngine
 
 class BulkDataLoader:
     """
     NEPSE Sovereign Quantitative Inference Terminal (v15.0)
-    File 6: Integrated Bulk Data Ingestion Pipeline.
-    Handles memory-protected streaming of raw floorsheet historicals.
+    File 6: Integrated Bulk Data Ingestion Pipeline (Refactored).
+    Directly addresses Schema Mismatch and Memory Optimization.
     """
 
     def __init__(self, db_engine: NEPSEDatabaseEngine):
         self.db_engine = db_engine
         self.db_path = db_engine.db_path
+        self.raw_data_dir = "./raw_data/"
 
-    def _standardize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _standardize_and_clean(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Flexible Mapping: Accounts for varying NEPSE column naming conventions.
-        Maps Contract No/Transaction No/id uniformly to Contract_ID, etc.
+        Force header standardization, 10-paisa rounding, and strict downcasting.
         """
+        # 1. Precise Header Mapping
         mapping = {
             'Contract No': 'Contract_ID',
             'Transaction No': 'Contract_ID',
             'id': 'Contract_ID',
+            'Stock Symbol': 'Symbol',
+            'Symbol': 'Symbol',
+            'Vol': 'Quantity',
+            'Quantity': 'Quantity',
             'Rate': 'Rate',
             'Price': 'Rate',
-            'Qty': 'Quantity',
-            'Quantity': 'Quantity',
             'Amount': 'Amount',
-            'Symbol': 'Symbol',
             'Date': 'Date',
-            'Time': 'Time',
-            'Timestamp': 'Timestamp'
+            'Time': 'Timestamp'
         }
 
-        # Identify available columns and rename
-        current_cols = df.columns.tolist()
-        rename_dict = {}
-        for raw, target in mapping.items():
-            if raw in current_cols:
-                rename_dict[raw] = target
+        # Rename based on existing columns
+        rename_map = {col: mapping[col] for col in df.columns if col in mapping}
+        df = df.rename(columns=rename_map)
 
-        df = df.rename(columns=rename_dict)
-        return df
-
-    def _cleansing_pipeline(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Data Cleansing Rules:
-        - NEPSE 10-paisa rounding rule.
-        - Drop anomalous historical test dates (e.g., January 3rd, 2024).
-        - Strict downcasting.
-        - Synthesize clean Timestamp.
-        """
         if df.empty:
             return df
 
-        # 1. NEPSE 10-Paisa Micro-Tick Rounding
+        # 2. Vectorized 10-Paisa Micro-Tick Rounding Structure
         if 'Rate' in df.columns:
             df['Rate'] = (df['Rate'] * 10).round() / 10.0
 
-        # 2. Drop Anomalous Date: January 3rd, 2024 (and 2026-01-03 per v15.0 core)
+        # 3. Temporal Purge (Jan 3rd session data - generic)
         if 'Date' in df.columns:
-            df['Date_dt'] = pd.to_datetime(df['Date'])
-            df = df[~((df['Date_dt'].dt.month == 1) & (df['Date_dt'].dt.day == 3) & (df['Date_dt'].dt.year == 2024))]
-            df = df[~((df['Date_dt'].dt.month == 1) & (df['Date_dt'].dt.day == 3) & (df['Date_dt'].dt.year == 2026))]
-            df = df.drop(columns=['Date_dt'])
+            df['Date_tmp'] = pd.to_datetime(df['Date'])
+            df = df[~((df['Date_tmp'].dt.month == 1) & (df['Date_tmp'].dt.day == 3))]
+            df = df.drop(columns=['Date_tmp'])
 
-        # 3. Dynamic Timestamp Synthesis
-        if 'Date' in df.columns and 'Time' in df.columns and 'Timestamp' not in df.columns:
-            df['Timestamp'] = df['Time']
-
-        # 4. Strict Downcasting & Type Enforcement
+        # 4. Strict Memory Downcasting & Type Enforcement
         if 'Contract_ID' in df.columns:
             df['Contract_ID'] = df['Contract_ID'].astype('int64')
         if 'Quantity' in df.columns:
@@ -85,62 +67,72 @@ class BulkDataLoader:
 
         return df
 
-    def process_files(self, file_paths: List[str], chunksize: int = 100000):
+    def run_ingestion_pipeline(self, chunksize: int = 100000):
         """
-        Memory Optimization & Protection:
-        Ingests raw data files in streaming chunks to guarantee zero RAM exhaustion.
+        Ingest raw files from ./raw_data/ via memory-safe chunking.
+        Ensures zero RAM exhaustion during multi-gigabyte loads.
         """
-        for path in file_paths:
-            print(f"Streaming ingestion for: {path}")
-            if not os.path.exists(path):
-                print(f"Skip: {path} not found.")
-                continue
+        search_pattern = os.path.join(self.raw_data_dir, "*.*")
+        files = glob.glob(search_pattern)
 
-            # Determine file type
-            if path.endswith('.csv'):
-                reader = pd.read_csv(path, chunksize=chunksize)
-            elif path.endswith('.txt'):
-                reader = pd.read_csv(path, sep='\t', chunksize=chunksize)
-            else:
-                # Fallback to full load for XLSX as pandas doesn't support chunksize for excel natively
-                # but we handle it via DB engine's multi-insertion
-                df = pd.read_excel(path)
-                self.db_engine.ingest_floorsheet(self._cleansing_pipeline(self._standardize_columns(df)))
-                continue
+        if not files:
+            print(f"Ingestion Alert: No raw data files detected in {self.raw_data_dir}")
+            return
 
-            for chunk in reader:
-                # Apply pipeline
-                chunk = self._standardize_columns(chunk)
-                chunk = self._cleansing_pipeline(chunk)
+        for file_path in files:
+            print(f"Processing File: {file_path}")
 
-                # Insert via DB Engine (which uses the temp table merge logic)
-                self.db_engine.ingest_floorsheet(chunk)
+            # Streaming Matrix for Memory Protection
+            try:
+                if file_path.endswith('.csv'):
+                    reader = pd.read_csv(file_path, chunksize=chunksize)
+                elif file_path.endswith('.txt'):
+                    reader = pd.read_csv(file_path, sep='\t', chunksize=chunksize)
+                else:
+                    # Non-chunkable formats (Excel) are passed directly to engine
+                    df = pd.read_excel(file_path)
+                    std_df = self._standardize_and_clean(df)
+                    self.db_engine.ingest_floorsheet(std_df)
+                    continue
 
-        # Post-ingestion optimization
-        self.optimize_database()
+                for chunk in reader:
+                    std_chunk = self._standardize_and_clean(chunk)
+                    # Pointing EXCLUSIVELY to the unified floorsheet table
+                    self.db_engine.ingest_floorsheet(std_chunk)
 
-    def optimize_database(self):
+            except Exception as e:
+                print(f"Ingestion Error on {file_path}: {e}")
+
+        # Post-Ingestion Closure Routine
+        self.establish_high_performance_indexes()
+
+    def establish_high_performance_indexes(self):
         """
-        Establish index on (Symbol, Date) and run vacuum/analyze.
-        Guarantees near-instantaneous query execution in the UI.
+        Creates multi-level database indexes on (Symbol, Date) using native SQL.
+        Runs database optimizations for near-instantaneous UI queries.
         """
-        print("Finalizing database optimization...")
+        print("Executing Post-Ingestion Database Optimization...")
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # Establishment of high-speed composite index
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_symbol_date_fast ON floorsheet (Symbol, Date);")
+        try:
+            # Unified schema indexing
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_symbol_date_optimized ON floorsheet (Symbol, Date);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_contract_full ON floorsheet (Contract_ID);")
 
-        # SQLite maintenance
-        cursor.execute("ANALYZE;")
-        cursor.execute("VACUUM;")
+            # Database Tuning
+            cursor.execute("ANALYZE;")
+            cursor.execute("VACUUM;")
 
-        conn.commit()
-        conn.close()
-        print("Optimization Complete. Production Ready.")
+            conn.commit()
+            print("Database Optimized. Multi-level Indexes Established.")
+        except sqlite3.Error as e:
+            print(f"Database Optimization Failure: {e}")
+        finally:
+            conn.close()
 
 if __name__ == "__main__":
-    # Integration logic
-    db = NEPSEDatabaseEngine()
-    loader = BulkDataLoader(db)
-    print("Bulk Data Loader (v15.0) Initialized.")
+    # Internal component initialization
+    engine = NEPSEDatabaseEngine()
+    loader = BulkDataLoader(engine)
+    loader.run_ingestion_pipeline()
