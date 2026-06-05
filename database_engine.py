@@ -112,26 +112,29 @@ class NEPSEDatabaseEngine:
     def ingest_floorsheet(self, raw_df: pd.DataFrame):
         """
         Primary Ingestion Pipeline: Sanitization -> Rounding -> Downcasting -> Insertion.
+        Uses INSERT OR IGNORE to bypass IntegrityErrors without using 'pass'.
         """
-        # 1. Regulatory Sanitization
         df = self.apply_regulatory_sanitization(raw_df)
-
-        # 2. Vectorized Grid Rounding
         df = self.apply_10_paisa_rounding(df)
-
-        # 3. Deterministic Downcasting
         df = self.downcast_memory(df)
 
         if df.empty:
             return
 
-        # 4. Multi-Row WAL Insertion
         conn = sqlite3.connect(self.db_path, timeout=60.0)
         try:
-            df.to_sql("floorsheet", conn, if_exists="append", index=False, method="multi", chunksize=1000)
-        except sqlite3.IntegrityError:
-            # Handle duplicates if re-running ingestion for the same IDs
-            pass
+            # 1. Push to a temporary staging table
+            df.to_sql("floorsheet_temp", conn, if_exists="replace", index=False)
+
+            # 2. Execute a strict SQL merge ignoring duplicate Contract_IDs
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR IGNORE INTO floorsheet
+                (Contract_ID, Symbol, Quantity, Rate, Amount, Timestamp, Date)
+                SELECT Contract_ID, Symbol, Quantity, Rate, Amount, Timestamp, Date
+                FROM floorsheet_temp
+            """)
+            conn.commit()
         finally:
             conn.close()
 
