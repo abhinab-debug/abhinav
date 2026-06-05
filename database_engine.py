@@ -18,6 +18,7 @@ class NEPSEDatabaseEngine:
         """Configures SQLite WAL mode and initializes the high-performance schema."""
         conn = sqlite3.connect(self.db_path, timeout=60.0)
         cursor = conn.cursor()
+        # Enable Write-Ahead Logging for concurrent read/write performance
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA synchronous=NORMAL;")
 
@@ -52,7 +53,7 @@ class NEPSEDatabaseEngine:
             )
         """)
 
-        # Optimized Indexing
+        # Optimized Multi-Level Indexing
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_symbol_date ON floorsheet (Symbol, Date);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_feat_symbol_date ON quant_features (Symbol, Date);")
 
@@ -61,7 +62,7 @@ class NEPSEDatabaseEngine:
 
     @staticmethod
     def downcast_memory(df: pd.DataFrame) -> pd.DataFrame:
-        """Deterministic memory downcasting for high-frequency parsing."""
+        """Deterministic memory downcasting to optimize processing speed."""
         fcols = df.select_dtypes('float').columns
         icols = df.select_dtypes('integer').columns
         df[fcols] = df[fcols].astype('float32')
@@ -69,10 +70,11 @@ class NEPSEDatabaseEngine:
         return df
 
     def apply_regulatory_sanitization(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Regulatory Compliance Filter: Drops non-equities and Jan 3rd session."""
+        """Strict Regulatory Compliance Filter: Drops non-equities and Jan 3rd session."""
         if df.empty: return df
         exclusion_regex = r'MF$|SF$|PO$|P$|-PO|D\d{2}|BD|D80'
         df = df[~df['Symbol'].str.contains(exclusion_regex, regex=True, na=False)]
+        # January 3rd Purge (Corrupted Session Data)
         df['Date_parsed'] = pd.to_datetime(df['Date'])
         df = df[~((df['Date_parsed'].dt.month == 1) & (df['Date_parsed'].dt.day == 3))]
         df = df.drop(columns=['Date_parsed'])
@@ -80,13 +82,13 @@ class NEPSEDatabaseEngine:
 
     @staticmethod
     def apply_10_paisa_rounding(df: pd.DataFrame) -> pd.DataFrame:
-        """Vectorized 10-Paisa Grid Rounding."""
+        """Vectorized 10-Paisa Grid Rounding rule."""
         if 'Rate' in df.columns:
-            df['Rate'] = np.round(df['Rate'] * 10) / 10
+            df['Rate'] = (df['Rate'] * 10).round() / 10.0
         return df
 
     def run_auto_healing_check(self, symbol: str, date: str) -> List[int]:
-        """Verifies continuous sequence order of Contract_IDs."""
+        """Identifies gaps in Contract_ID sequencing."""
         conn = sqlite3.connect(self.db_path)
         query = "SELECT Contract_ID FROM floorsheet WHERE Symbol = ? AND Date = ? ORDER BY Contract_ID"
         df = pd.read_sql_query(query, conn, params=(symbol, date))
@@ -118,7 +120,7 @@ class NEPSEDatabaseEngine:
             conn.close()
 
     def upsert_quant_features(self, df: pd.DataFrame):
-        """Bulk persistence for pre-calculated quantitative metrics."""
+        """Bulk persistence for pre-calculated quantitative vectors."""
         if df.empty: return
         conn = sqlite3.connect(self.db_path, timeout=60.0)
         try:
@@ -154,7 +156,7 @@ class NEPSEDatabaseEngine:
         query = """
             SELECT * FROM quant_features
             WHERE Symbol = ?
-            ORDER BY Date DESC LIMIT ?
+            ORDER BY Date ASC LIMIT ?
         """
         df = pd.read_sql_query(query, conn, params=(symbol, lookback_days))
         conn.close()
@@ -162,4 +164,4 @@ class NEPSEDatabaseEngine:
 
 if __name__ == "__main__":
     engine = NEPSEDatabaseEngine()
-    print("Feature Store Infrastructure Initialized.")
+    print("Institutional Database Infrastructure Locked.")
