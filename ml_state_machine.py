@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
 from hmmlearn import hmm
-from typing import Tuple, List, Generator
+import xgboost as xgb
+from typing import Tuple, List, Generator, Optional
 from scipy import stats
 
 class BayesianLikelihoodEngine:
@@ -87,6 +88,30 @@ class PurgedTimeSeriesSplit:
 
             yield train_indices, test_indices
 
+class SovereignXGBoost:
+    """Phase 2: Sovereign Autonomy - XGBoost Inference Engine."""
+    def __init__(self):
+        self.model = xgb.XGBClassifier(
+            n_estimators=100,
+            max_depth=5,
+            learning_rate=0.05,
+            objective='binary:logistic',
+            random_state=42
+        )
+        self.is_trained = False
+
+    def train(self, X: np.ndarray, y: np.ndarray):
+        """Trains the model using purged walk-forward cross validation sets."""
+        if len(X) < 20: return
+        self.model.fit(X, y)
+        self.is_trained = True
+
+    def predict_probability(self, X: np.ndarray) -> np.ndarray:
+        """Returns the probability of a positive alpha signal."""
+        if not self.is_trained:
+            return np.array([0.5] * len(X))
+        return self.model.predict_proba(X)[:, 1]
+
 class GNNSectorCascades:
     """
     Causal t-1 VAR Node Networks.
@@ -106,7 +131,7 @@ class GNNSectorCascades:
         if np.std(x) == 0:
             return 1.0
 
-        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        slope, _, _, _, _ = stats.linregress(x, y)
         # Return slope as the causal tracking multiplier
         return float(slope)
 
@@ -119,6 +144,7 @@ class MLStateMachine:
         self.data_length_days = data_length_days
         self.bayesian_engine = BayesianLikelihoodEngine()
         self.hmm_engine = GaussianHMMRegime()
+        self.xgb_engine = SovereignXGBoost()
 
     def route_inference(self, features: np.ndarray) -> str:
         """
